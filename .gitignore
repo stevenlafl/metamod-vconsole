@@ -1,0 +1,25 @@
+# Build directories
+build-x86/
+build-x64/
+build/
+
+# vcpkg
+deps/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Compiled files
+*.o
+*.so
+*.dll
+*.a
+*.lib
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
