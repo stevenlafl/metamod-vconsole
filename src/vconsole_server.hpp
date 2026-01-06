@@ -49,7 +49,7 @@ class VConsoleServer {
 public:
     static VConsoleServer& getInstance();
 
-    bool initialize(uint16_t port = 29000);
+    bool initialize(uint16_t port = 29000, const std::string& bindAddr = "0.0.0.0");
     void shutdown();
     void tick();
 
@@ -58,6 +58,9 @@ public:
     uint16_t getPort() const { return m_port; }
     size_t getClientCount() const;
     bool isRunning() const { return m_running; }
+    void setMaxConnections(int max) { m_maxConnections = max; }
+    void setLogging(bool enabled) { m_logging = enabled; }
+    void logLocal(const char* msg);
 
 private:
     VConsoleServer();
@@ -80,7 +83,13 @@ private:
 
     SOCKET m_listenSocket;
     uint16_t m_port;
+    std::string m_bindAddr;
     bool m_running;
+    int m_maxConnections;
+    bool m_logging;
+
+    void stopListening();
+    void startListening();
 
     std::vector<ClientInfo> m_clients;
     std::mutex m_clientsMutex;

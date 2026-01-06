@@ -66,9 +66,17 @@ if [ "$ARCH" = "all" ] || [ "$ARCH" = "x64" ]; then
 fi
 
 # Copy the built .so file to the HLDS installation (x86 for Half-Life)
+HLDS_ADDON_DIR="/home/stevenlafl/Containers/hlds/hlds/ts/addons/metamod-vconsole"
 if [ -f "./build-x86/Debug/bin/libmetamod-vconsole.so" ]; then
     echo "Copying x86 libmetamod-vconsole.so to HLDS installation..."
-    mkdir -p "/home/stevenlafl/Containers/hlds/hlds/ts/addons/metamod-vconsole/dlls/"
-    cp "./build-x86/Debug/bin/libmetamod-vconsole.so" "/home/stevenlafl/Containers/hlds/hlds/ts/addons/metamod-vconsole/dlls/"
+    mkdir -p "${HLDS_ADDON_DIR}/dlls/"
+    cp "./build-x86/Debug/bin/libmetamod-vconsole.so" "${HLDS_ADDON_DIR}/dlls/"
+
+    # Copy config.ini if it doesn't exist (don't overwrite user config)
+    if [ ! -f "${HLDS_ADDON_DIR}/config.ini" ]; then
+        echo "Copying default config.ini..."
+        cp "./config.ini" "${HLDS_ADDON_DIR}/"
+    fi
+
     echo "Done"
 fi

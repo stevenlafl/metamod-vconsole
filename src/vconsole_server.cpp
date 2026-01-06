@@ -19,6 +19,8 @@ VConsoleServer::VConsoleServer()
     : m_listenSocket(INVALID_SOCKET)
     , m_port(0)
     , m_running(false)
+    , m_maxConnections(1)
+    , m_logging(true)
 #ifndef _WIN32
     , m_stdoutPipe{-1, -1}
     , m_stderrPipe{-1, -1}
@@ -45,7 +47,7 @@ void VConsoleServer::setNonBlocking(SOCKET socket) {
 #endif
 }
 
-bool VConsoleServer::initialize(uint16_t port) {
+bool VConsoleServer::initialize(uint16_t port, const std::string& bindAddr) {
     if (m_running) {
         return true;
     }
@@ -57,9 +59,40 @@ bool VConsoleServer::initialize(uint16_t port) {
     }
 #endif
 
+    m_port = port;
+    m_bindAddr = bindAddr;
+    m_running = true;
+
+    startListening();
+
+    if (m_listenSocket == INVALID_SOCKET) {
+        m_running = false;
+        return false;
+    }
+
+#ifndef _WIN32
+    setupOutputCapture();
+#endif
+
+    return true;
+}
+
+void VConsoleServer::stopListening() {
+    if (m_listenSocket != INVALID_SOCKET) {
+        ::shutdown(m_listenSocket, SHUT_RDWR);
+        closesocket(m_listenSocket);
+        m_listenSocket = INVALID_SOCKET;
+    }
+}
+
+void VConsoleServer::startListening() {
+    if (m_listenSocket != INVALID_SOCKET || !m_running) {
+        return;
+    }
+
     m_listenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (m_listenSocket == INVALID_SOCKET) {
-        return false;
+        return;
     }
 
     int opt = 1;
@@ -67,30 +100,26 @@ bool VConsoleServer::initialize(uint16_t port) {
 
     sockaddr_in serverAddr{};
     serverAddr.sin_family = AF_INET;
-    serverAddr.sin_addr.s_addr = INADDR_ANY;
-    serverAddr.sin_port = htons(port);
+    if (m_bindAddr == "0.0.0.0" || m_bindAddr.empty()) {
+        serverAddr.sin_addr.s_addr = INADDR_ANY;
+    } else {
+        inet_pton(AF_INET, m_bindAddr.c_str(), &serverAddr.sin_addr);
+    }
+    serverAddr.sin_port = htons(m_port);
 
     if (bind(m_listenSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
         closesocket(m_listenSocket);
         m_listenSocket = INVALID_SOCKET;
-        return false;
+        return;
     }
 
     if (listen(m_listenSocket, SOMAXCONN) == SOCKET_ERROR) {
         closesocket(m_listenSocket);
         m_listenSocket = INVALID_SOCKET;
-        return false;
+        return;
     }
 
     setNonBlocking(m_listenSocket);
-    m_port = port;
-    m_running = true;
-
-#ifndef _WIN32
-    setupOutputCapture();
-#endif
-
-    return true;
 }
 
 void VConsoleServer::shutdown() {
@@ -111,11 +140,7 @@ void VConsoleServer::shutdown() {
     }
     m_clients.clear();
 
-    if (m_listenSocket != INVALID_SOCKET) {
-        ::shutdown(m_listenSocket, SHUT_RDWR);
-        closesocket(m_listenSocket);
-        m_listenSocket = INVALID_SOCKET;
-    }
+    stopListening();
 
 #ifdef _WIN32
     WSACleanup();
@@ -136,6 +161,10 @@ void VConsoleServer::tick() {
 }
 
 void VConsoleServer::acceptClients() {
+    if (m_listenSocket == INVALID_SOCKET) {
+        return;
+    }
+
     sockaddr_in clientAddr;
     socklen_t clientAddrLen = sizeof(clientAddr);
     SOCKET clientSocket = accept(m_listenSocket, (sockaddr*)&clientAddr, &clientAddrLen);
@@ -144,23 +173,28 @@ void VConsoleServer::acceptClients() {
         return;
     }
 
-    setNonBlocking(clientSocket);
-
-    int opt = 1;
-    setsockopt(clientSocket, IPPROTO_TCP, TCP_NODELAY, (const char*)&opt, sizeof(opt));
-
     char clientIP[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &(clientAddr.sin_addr), clientIP, INET_ADDRSTRLEN);
     uint16_t clientPort = ntohs(clientAddr.sin_port);
 
     {
         std::lock_guard<std::mutex> lock(m_clientsMutex);
+
+        setNonBlocking(clientSocket);
+
+        int opt = 1;
+        setsockopt(clientSocket, IPPROTO_TCP, TCP_NODELAY, (const char*)&opt, sizeof(opt));
+
         m_clients.emplace_back(clientSocket, clientIP, clientPort);
+
+        if (m_maxConnections > 0 && static_cast<int>(m_clients.size()) >= m_maxConnections) {
+            stopListening();
+        }
     }
 
     char logMsg[128];
     snprintf(logMsg, sizeof(logMsg), "[VConsole] Client connected: %s:%u\n", clientIP, clientPort);
-    SERVER_PRINT(logMsg);
+    logLocal(logMsg);
 
     sendAINF(clientSocket);
     sendADON(clientSocket, "HLDS");
@@ -194,16 +228,12 @@ void VConsoleServer::processClients() {
     }
 
     for (SOCKET s : toRemove) {
-        auto it = std::find_if(m_clients.begin(), m_clients.end(),
-            [s](const ClientInfo& c) { return c.socket == s; });
-        if (it != m_clients.end()) {
-            char logMsg[128];
-            snprintf(logMsg, sizeof(logMsg), "[VConsole] Client disconnected: %s:%u\n", it->ip.c_str(), it->port);
-            SERVER_PRINT(logMsg);
+        removeClient(s);
+    }
 
-            ::shutdown(it->socket, SHUT_RDWR);
-            closesocket(it->socket);
-            m_clients.erase(it);
+    if (!toRemove.empty() && m_listenSocket == INVALID_SOCKET) {
+        if (m_maxConnections == 0 || static_cast<int>(m_clients.size()) < m_maxConnections) {
+            startListening();
         }
     }
 }
@@ -215,11 +245,6 @@ void VConsoleServer::handleClientMessage(ClientInfo& client, const char* data, s
 
     const VConChunk* header = reinterpret_cast<const VConChunk*>(data);
     std::string msgType(header->type, 4);
-
-    char logMsg[256];
-    snprintf(logMsg, sizeof(logMsg), "[VConsole] Received packet type '%s' (%zu bytes) from %s:%u\n",
-             msgType.c_str(), len, client.ip.c_str(), client.port);
-    SERVER_PRINT(logMsg);
 
     if (msgType == "CMND") {
         uint16_t packetLen = ntohs(header->length);
@@ -236,7 +261,7 @@ void VConsoleServer::handleClientMessage(ClientInfo& client, const char* data, s
                 char logMsg[512];
                 snprintf(logMsg, sizeof(logMsg), "[VConsole] Command from %s:%u: %s\n",
                          client.ip.c_str(), client.port, command.c_str());
-                SERVER_PRINT(logMsg);
+                logLocal(logMsg);
 
                 extern void executeServerCommand(const std::string& cmd);
                 executeServerCommand(command);
@@ -245,7 +270,7 @@ void VConsoleServer::handleClientMessage(ClientInfo& client, const char* data, s
     } else {
         char logMsg[512];
         snprintf(logMsg, sizeof(logMsg), "[VConsole] Unknown packet type '%s', hex dump: ", msgType.c_str());
-        SERVER_PRINT(logMsg);
+        logLocal(logMsg);
 
         std::string hexDump;
         for (size_t i = 0; i < len && i < 64; i++) {
@@ -255,15 +280,18 @@ void VConsoleServer::handleClientMessage(ClientInfo& client, const char* data, s
         }
         if (len > 64) hexDump += "...";
         hexDump += "\n";
-        SERVER_PRINT(hexDump.c_str());
+        logLocal(hexDump.c_str());
     }
 }
 
 void VConsoleServer::removeClient(SOCKET socket) {
-    std::lock_guard<std::mutex> lock(m_clientsMutex);
     auto it = std::find_if(m_clients.begin(), m_clients.end(),
         [socket](const ClientInfo& c) { return c.socket == socket; });
     if (it != m_clients.end()) {
+        char logMsg[128];
+        snprintf(logMsg, sizeof(logMsg), "[VConsole] Client disconnected: %s:%u\n", it->ip.c_str(), it->port);
+        logLocal(logMsg);
+
         ::shutdown(it->socket, SHUT_RDWR);
         closesocket(it->socket);
         m_clients.erase(it);
@@ -272,6 +300,19 @@ void VConsoleServer::removeClient(SOCKET socket) {
 
 size_t VConsoleServer::getClientCount() const {
     return m_clients.size();
+}
+
+void VConsoleServer::logLocal(const char* msg) {
+    if (!m_logging) {
+        return;
+    }
+#ifndef _WIN32
+    if (m_origStdout != -1) {
+        write(m_origStdout, msg, strlen(msg));
+        return;
+    }
+#endif
+    SERVER_PRINT(msg);
 }
 
 void VConsoleServer::sendPacket(SOCKET socket, const char* type, const std::vector<uint8_t>& payload) {
@@ -377,23 +418,9 @@ void VConsoleServer::broadcastPrint(const std::string& message, int32_t channelI
 
     std::vector<uint8_t> payload = createPRNTPacket(message, channelId, color);
 
-    std::vector<uint8_t> packet;
-    packet.reserve(sizeof(VConChunk) + payload.size());
-
-    VConChunk header;
-    memcpy(header.type, "PRNT", 4);
-    header.version = htonl(0x000000D4);
-    header.length = htons(static_cast<uint16_t>(sizeof(VConChunk) + payload.size()));
-    header.handle = htons(0);
-
-    packet.insert(packet.end(), reinterpret_cast<uint8_t*>(&header),
-                  reinterpret_cast<uint8_t*>(&header) + sizeof(VConChunk));
-    packet.insert(packet.end(), payload.begin(), payload.end());
-
     std::lock_guard<std::mutex> lock(m_clientsMutex);
     for (auto& client : m_clients) {
-        send(client.socket, reinterpret_cast<const char*>(packet.data()),
-             static_cast<int>(packet.size()), 0);
+        sendPacket(client.socket, "PRNT", payload);
     }
 }
 

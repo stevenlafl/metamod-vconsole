@@ -27,6 +27,7 @@ list(APPEND SOURCES_LIST
 	"src/dllapi.cpp"
 	"src/engine_api.cpp"
 	"src/vconsole_server.cpp"
+	"src/config.cpp"
 )
 
 add_library(${PROJECT_NAME} SHARED ${SOURCES_LIST})

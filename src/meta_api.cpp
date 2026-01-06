@@ -1,8 +1,11 @@
 #include <extdll.h>
 #include <meta_api.h>
 #include "vconsole_server.hpp"
+#include "config.hpp"
 
 #define METAMOD_VCONSOLE_VERSION "0.1.0"
+
+static VConsoleConfig g_config;
 
 meta_globals_t *gpMetaGlobals;
 gamedll_funcs_t *gpGamedllFuncs;
@@ -65,14 +68,33 @@ C_DLLEXPORT int Meta_Attach(PLUG_LOADTIME now, META_FUNCTIONS *pFunctionTable, m
 
 	g_engfuncs.pfnServerPrint("\n##########################\n# MetamodVConsole Loaded #\n##########################\n\n");
 
-	uint16_t port = 29000;
-	if (VConsoleServer::getInstance().initialize(port)) {
-		char msg[128];
-		snprintf(msg, sizeof(msg), "MetamodVConsole: VConsole server listening on port %d\n",
-		         VConsoleServer::getInstance().getPort());
+	std::string pluginDir = getPluginDirectory();
+	std::string configPath = pluginDir + "config.ini";
+
+	if (loadConfig(configPath, g_config)) {
+		char msg[256];
+		snprintf(msg, sizeof(msg), "MetamodVConsole: Loaded config from %s\n", configPath.c_str());
 		g_engfuncs.pfnServerPrint(msg);
 	} else {
-		g_engfuncs.pfnServerPrint("MetamodVConsole: Failed to start VConsole server!\n");
+		char msg[256];
+		snprintf(msg, sizeof(msg), "MetamodVConsole: Config not found at %s, using defaults\n", configPath.c_str());
+		g_engfuncs.pfnServerPrint(msg);
+	}
+
+	VConsoleServer::getInstance().setMaxConnections(g_config.max_connections);
+	VConsoleServer::getInstance().setLogging(g_config.logging);
+
+	if (VConsoleServer::getInstance().initialize(g_config.port, g_config.bind)) {
+		char msg[128];
+		snprintf(msg, sizeof(msg), "MetamodVConsole: VConsole server listening on %s:%d (max %d conn)\n",
+		         g_config.bind.c_str(), VConsoleServer::getInstance().getPort(),
+		         g_config.max_connections > 0 ? g_config.max_connections : -1);
+		g_engfuncs.pfnServerPrint(msg);
+	} else {
+		char msg[128];
+		snprintf(msg, sizeof(msg), "MetamodVConsole: Failed to start VConsole server on %s:%d!\n",
+		         g_config.bind.c_str(), g_config.port);
+		g_engfuncs.pfnServerPrint(msg);
 	}
 
 	memcpy(pFunctionTable, &gMetaFunctionTable, sizeof(META_FUNCTIONS));
