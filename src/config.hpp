@@ -6,7 +6,7 @@
 
 struct VConsoleConfig {
     uint16_t port = 29000;
-    std::string bind = "0.0.0.0";
+    std::string bind = "127.0.0.1";
     int max_connections = 1;  // 0 = unlimited
     bool logging = true;
 };
